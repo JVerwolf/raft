@@ -14,6 +14,10 @@ const (
 
 type Node struct {
     nodeType NodeType
+    peers    []*Node
+
+    // The following values are from the states
+    // described in the raft paper:
 
     // PERSISTENT STATE:
 
@@ -53,6 +57,26 @@ type Node struct {
     // known to be replicated on server
     // (initialized to 0, increases monotonically).
     matchIndex []int
+}
+func NewNode(peers []*Node) (this *Node) {
+    this = new(Node)
+    this.nodeType = Follower
+
+    // Initialize (non-leader)State described in the Raft paper:
+    this.currentTerm = 0
+    this.votedFor = -1
+    this.log = make([]Entry, 0) // TODO: Initialize to 1?
+    this.commitIndex = 0
+    this.lastApplied = 0
+
+    // Distribute knowledge to peers.
+    // In a real-world scenario, this would be handled by a
+    // configuration manager, such as Zookeeper.
+    peers = append(peers, this)
+    for _, node := range peers {
+        node.peers = peers
+    }
+    return
 }
 
 type Entry struct {
