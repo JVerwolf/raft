@@ -13,8 +13,17 @@ const (
 )
 
 type Node struct {
+    // Node ID
+    id int
+
+    // Role of the node.
     nodeType NodeType
-    peers    []*Node
+
+    // State Machine
+    stateMachine func(int)
+
+    // List of other nodes participating in the protocol.
+    peers []*Node
 
     // The following values are from the states
     // described in the raft paper:
@@ -65,8 +74,11 @@ type Entry struct {
     TermNum int
 }
 
-func NewNode(peers []*Node) (this *Node) {
+func NewNode(id int, peers []*Node, statemachine func(int)) (this *Node) {
     this = new(Node)
+
+    this.id = id
+    this.stateMachine = statemachine
     this.nodeType = Follower
 
     // Initialize (non-leader)State described in the Raft paper:
@@ -188,6 +200,8 @@ func (this *Node) RequestVoteRPC(
     if (notYetVoted || votedSameBefore) && requesterMoreUpToDate {
         return this.currentTerm, true
     }
+
+    return this.currentTerm, false
 }
 
 // minInt finds Min of ints.
