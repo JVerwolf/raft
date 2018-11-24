@@ -58,6 +58,13 @@ type Node struct {
     // (initialized to 0, increases monotonically).
     matchIndex []int
 }
+
+type Entry struct {
+    Command string
+    Index   int
+    TermNum int
+}
+
 func NewNode(peers []*Node) (this *Node) {
     this = new(Node)
     this.nodeType = Follower
@@ -79,10 +86,35 @@ func NewNode(peers []*Node) (this *Node) {
     return
 }
 
-type Entry struct {
-    Command string
-    Index   int
-    TermNum int
+func (this *Node) BecomeLeader() {
+    this.nodeType = Leader
+
+    // Initialize all nextIndex values to the index value just
+    // after the last index in the log. (The log starts at 1.)
+    this.nextIndex = make([]int, len(this.peers))
+    for i := range this.nextIndex {
+        this.nextIndex[i] = len(this.log) + 1
+    }
+
+    // For each server, index of highest log entry
+    // known to be replicated on server
+    // (initialized to 0, increases monotonically).
+    this.matchIndex = make([]int, len(this.peers))
+    for i := range this.matchIndex {
+        this.matchIndex[i] = 0 //TODO: ensure this is correct, will need to iteratively increment values to match followers later
+    }
+}
+
+func (this *Node) BecomeFollower() {
+    this.nodeType = Follower
+    this.nextIndex = nil
+    this.matchIndex = nil
+}
+
+func (this *Node) BecomeCandidate() {
+    this.nodeType = Candidate
+    this.nextIndex = nil
+    this.matchIndex = nil
 }
 
 func (this *Node) AppendEntriesRPC(
