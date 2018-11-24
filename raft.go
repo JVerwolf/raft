@@ -60,3 +60,62 @@ type Entry struct {
     Index   int
     TermNum int
 }
+
+func (this *Node) AppendEntriesRPC(
+    term,
+    leaderId,
+    prevLogIndex,
+    prevLogTerm int,
+    newEntries []Entry,
+    leaderCommit int) (termResult int, success bool) {
+    // TODO: Sort newEntries?
+
+    // 1. Reply false if term < currentTerm.
+    if term < this.currentTerm {
+        return this.currentTerm, false
+    }
+
+    // 2. Reply false if log doesn’t contain an entry at prevLogIndex
+    //    whose term matches prevLogTerm (see §5.3 of the raft paper).
+    if this.log[prevLogIndex].TermNum != prevLogTerm {
+        return this.currentTerm, false
+    }
+
+    // 3. If an existing entry conflicts with a new one (same index
+    //    but different terms), delete the existing entry and all that
+    //    follow it (see §5.3 of the raft paper).
+    for _, newEntry := range newEntries {
+        indexIsInRange := len(this.log) <= newEntry.Index
+        if indexIsInRange {
+            entryIsUnequal := !cmp.Equal(this.log[newEntry.Index], newEntry)
+            if entryIsUnequal {
+                this.log = this.log[:newEntry.Index] // todo: check to ensure this works.
+            }
+        }
+
+    }
+
+    // 4. Append any new entries not already in the log
+    this.log = append(this.log, newEntries...)
+
+    // 5. If leaderCommit > commitIndex, set commitIndex =
+    //    min(leaderCommit, index of last new entry).
+    if leaderCommit > this.commitIndex {
+        this.commitIndex = minInt(leaderCommit, lastEntryIndex(newEntries))
+    }
+
+    return this.currentTerm, true
+}
+
+// minInt finds Min of ints.
+func minInt(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+// lastEntryIndex find last index of Entry in slice of Entries.
+func lastEntryIndex(ents []Entry) int {
+    return ents[len(ents)-1].Index
+}
