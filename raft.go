@@ -101,10 +101,37 @@ func (this *Node) AppendEntriesRPC(
     // 5. If leaderCommit > commitIndex, set commitIndex =
     //    min(leaderCommit, index of last new entry).
     if leaderCommit > this.commitIndex {
-        this.commitIndex = minInt(leaderCommit, lastEntryIndex(newEntries))
+        this.commitIndex = minInt(leaderCommit, lastEntry(newEntries).Index)
     }
 
     return this.currentTerm, true
+}
+
+func (this *Node) RequestVoteRPC(
+    term,
+    candidateId,
+    lastLogIndex,
+    lastLogTerm int) (termResult int, voteGranted bool) {
+
+    //1. Reply false if term < currentTerm (see §5.1 of the raft paper)
+    if term < this.currentTerm {
+        return this.currentTerm, false
+    }
+
+    // 2. If votedFor is null or candidateId, and candidate’s log
+    //    is at least as up-to-date as receiver’s log (see below),
+    //    grant vote (see §5.2 and §5.4 of the raft paper)
+    //
+    //    If the logs have last entries with different terms,
+    //    then the log with the later term is more up-to-date.
+    //    If the logs end with the same term, then whichever
+    //    log is longer is more up-to-date.
+    notYetVoted := this.votedFor == -1
+    votedSameBefore := this.votedFor == candidateId
+    requesterMoreUpToDate := lastEntry(this.log).TermNum <= term
+    if (notYetVoted || votedSameBefore) && requesterMoreUpToDate {
+        return this.currentTerm, true
+    }
 }
 
 // minInt finds Min of ints.
@@ -115,7 +142,7 @@ func minInt(a, b int) int {
     return b
 }
 
-// lastEntryIndex find last index of Entry in slice of Entries.
-func lastEntryIndex(ents []Entry) int {
-    return ents[len(ents)-1].Index
+// lastEntry find last Entry in slice of Entries.
+func lastEntry(ents []Entry) Entry {
+    return ents[len(ents)-1]
 }
