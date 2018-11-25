@@ -20,7 +20,7 @@ type Node struct {
     nodeType NodeType
 
     // State Machine
-    stateMachine func(int)
+    stateMachine func(string)
 
     // List of other nodes participating in the protocol.
     peers []*Node
@@ -74,7 +74,7 @@ type Entry struct {
     TermNum int
 }
 
-func NewNode(id int, peers []*Node, statemachine func(int)) (this *Node) {
+func NewNode(id int, peers []*Node, statemachine func(string)) (this *Node) {
     this = new(Node)
 
     this.id = id
@@ -138,6 +138,9 @@ func (this *Node) AppendEntriesRPC(
     leaderCommit int) (termResult int, success bool) {
     // TODO: Sort newEntries?
 
+    // Abdicate leadership if requester has higher term.
+    this.testToAbdicateLeadership(term)
+
     // 1. Reply false if term < currentTerm.
     if term < this.currentTerm {
         return this.currentTerm, false
@@ -180,6 +183,8 @@ func (this *Node) RequestVoteRPC(
     candidateId,
     lastLogIndex,
     lastLogTerm int) (termResult int, voteGranted bool) {
+    // Abdicate leadership if requester has higher term.
+    this.testToAbdicateLeadership(term)
 
     //1. Reply false if term < currentTerm (see §5.1 of the raft paper)
     if term < this.currentTerm {
@@ -202,6 +207,19 @@ func (this *Node) RequestVoteRPC(
     }
 
     return this.currentTerm, false
+}
+
+func (this *Node) testToAbdicateLeadership(term int) {
+    // Ensure the following property:
+    // If RPC request or response contains
+    // term T > currentTerm: set currentTerm = T,
+    // convert to follower (see §5.1 of the raft
+    // paper)
+
+    if term > this.currentTerm {
+        this.currentTerm = term
+        this.nodeType = Follower
+    }
 }
 
 // minInt finds Min of ints.
