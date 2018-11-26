@@ -22,6 +22,10 @@ const (
 )
 
 type Node struct {
+    // IMPLEMENTATION SPECIFIC STATE:
+    // The following values are specific to this implementation
+    // and are not a part of the raft consensus algorithm.
+
     // Node ID
     id int
 
@@ -34,8 +38,11 @@ type Node struct {
     // List of other nodes participating in the protocol.
     peers []*Node
 
-    timeout *ticker
+    timeout                 *ticker     // Externally declared so it can be reset
+    heartBeatInput          chan string // Externally declared so it can be accessed
+    killCurrentListenerChan chan bool   // Externally declared so it can be accessed
 
+    // RAFT SPECIFIC STATE:
     // The following values are from the states
     // described in the raft paper:
 
@@ -85,13 +92,13 @@ type Entry struct {
     TermNum int
 }
 
-func NewNode(id int, peers []*Node, statemachine func(string)) (this *Node) {
+func NewNode(id int, peers []*Node, stateMachine func(string)) (this *Node) {
     this = new(Node)
 
     this.id = id
-    this.nodeType = Follower
-    this.timeout = newTicker(FollowerPeriod)
-    this.stateMachine = statemachine
+    this.BecomeFollower()
+    this.heartBeatInput = make(chan string)
+    this.stateMachine = stateMachine
 
     // Initialize (non-leader)State described in the Raft paper:
     this.currentTerm = 0
@@ -121,24 +128,43 @@ func (this *Node) BecomeLeader() {
     }
 
     // For each server, index of highest log entry
-    // known to be replicated on server
-    // (initialized to 0, increases monotonically).
+    // known to be replicated on server (initialized
+    // to 0, increases monotonically).
     this.matchIndex = make([]int, len(this.peers))
     for i := range this.matchIndex {
         this.matchIndex[i] = 0 //TODO: ensure this is correct, will need to iteratively increment values to match followers later
     }
+
+    // Leaders don't timeout, so remove listener closure.
+    this.timeout = nil
+    this.killCurrentListenerChan <- true
 }
 
 func (this *Node) BecomeFollower() {
     this.nodeType = Follower
+
+    // Remove leader attributes.
     this.nextIndex = nil
     this.matchIndex = nil
+
+    // Reset listener closure.
+    this.timeout = newTicker(CandidatePeriod)
+    this.killCurrentListenerChan <- true
+    go this.listener(this.heartBeatInput, this.BecomeCandidate)
 }
 
 func (this *Node) BecomeCandidate() {
     this.nodeType = Candidate
+
+    // Remove leader attributes.
     this.nextIndex = nil
     this.matchIndex = nil
+
+    // Reset listener closure.
+    this.timeout = newTicker(CandidatePeriod)
+    this.killCurrentListenerChan <- true
+    go this.listener(this.heartBeatInput, this.BecomeCandidate)
+
     //TODO: implement logic for requesting voting
 
 }
@@ -252,18 +278,46 @@ func newTicker(period time.Duration) *ticker {
 
 // listener used to act on heartbeat signals.
 // Will call callback on timeout.
-func (this *Node) listener(doneChan chan bool, heartBeat chan string, callback func()) {
+func (this *Node) listener(heartBeat chan string, callback func()) {
     for {
         select {
         case msg := <-heartBeat:
             this.timeout.reset()
-            fmt.Println("received: ", msg, " from hearbeat")
+            fmt.Println("received: ", msg, " from hearbeat") //TODO replace with action callback
         case <-this.timeout.ticker.C:
             // call to change state
             callback()
+        case <-this.killCurrentListenerChan:
+            return
         }
     }
-    doneChan <- true
+}
+
+func (this *Node) ServerEventLoop(quit chan int) {
+
+    // Note: Node could die any time, instead of dying in a
+    // well-behaved state like what is is shown when quit is
+    // called.
+    go func() {
+        for {
+            select {
+            case <-quit:
+                return
+            default:
+                // If commitIndex > lastApplied: increment
+                // lastApplied, apply log[lastApplied] to
+                // state machine (see §5.3 of the raft paper)
+                if this.commitIndex > this.lastApplied {
+                    this.lastApplied += 1
+                    this.stateMachine(this.log[this.lastApplied].Command)
+                }
+
+            }
+        }
+        //TODO: might need a waitgroup
+    }()
+
+    // If commitIndex > lastApplied: increment lastApplied, apply
 }
 
 // minInt finds Min of ints.
@@ -278,3 +332,6 @@ func minInt(a, b int) int {
 func lastEntry(ents []Entry) Entry {
     return ents[len(ents)-1]
 }
+
+/*
+check to see if thread blocks when putting item on full chan
