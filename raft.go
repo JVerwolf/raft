@@ -1,7 +1,16 @@
-package raft
+package main
 
 import (
     "github.com/google/go-cmp/cmp"
+    "time"
+    "fmt"
+)
+
+const (
+    FollowerPeriod  = 3 * time.Second
+    CandidatePeriod = 3 * time.Second
+    LeaderPeriod    = 3 * time.Second
+    HeartBeatPeriod = 2 * time.Second
 )
 
 type NodeType int
@@ -24,6 +33,8 @@ type Node struct {
 
     // List of other nodes participating in the protocol.
     peers []*Node
+
+    timeout *ticker
 
     // The following values are from the states
     // described in the raft paper:
@@ -78,8 +89,9 @@ func NewNode(id int, peers []*Node, statemachine func(string)) (this *Node) {
     this = new(Node)
 
     this.id = id
-    this.stateMachine = statemachine
     this.nodeType = Follower
+    this.timeout = newTicker(FollowerPeriod)
+    this.stateMachine = statemachine
 
     // Initialize (non-leader)State described in the Raft paper:
     this.currentTerm = 0
@@ -127,6 +139,8 @@ func (this *Node) BecomeCandidate() {
     this.nodeType = Candidate
     this.nextIndex = nil
     this.matchIndex = nil
+    //TODO: implement logic for requesting voting
+
 }
 
 func (this *Node) AppendEntriesRPC(
@@ -183,7 +197,8 @@ func (this *Node) RequestVoteRPC(
     candidateId,
     lastLogIndex,
     lastLogTerm int) (termResult int, voteGranted bool) {
-    // Abdicate leadership if requester has higher term.
+
+    // Abdicate leadership if requester has a higher term.
     this.testToAbdicateLeadership(term)
 
     //1. Reply false if term < currentTerm (see §5.1 of the raft paper)
@@ -220,6 +235,35 @@ func (this *Node) testToAbdicateLeadership(term int) {
         this.currentTerm = term
         this.nodeType = Follower
     }
+}
+
+type ticker struct {
+    period time.Duration
+    ticker time.Ticker
+}
+
+func (t *ticker) reset() {
+    t.ticker = *time.NewTicker(t.period)
+}
+
+func newTicker(period time.Duration) *ticker {
+    return &ticker{period, *time.NewTicker(period)}
+}
+
+// listener used to act on heartbeat signals.
+// Will call callback on timeout.
+func (this *Node) listener(doneChan chan bool, heartBeat chan string, callback func()) {
+    for {
+        select {
+        case msg := <-heartBeat:
+            this.timeout.reset()
+            fmt.Println("received: ", msg, " from hearbeat")
+        case <-this.timeout.ticker.C:
+            // call to change state
+            callback()
+        }
+    }
+    doneChan <- true
 }
 
 // minInt finds Min of ints.
