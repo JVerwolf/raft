@@ -34,6 +34,3 @@ Rafters to play with the code and make sense of the system.
 
 Please note that this Repo is not yet finished, but will be
 available by mid Dec 2018.
-
-<embed src="https://github.com/ongardie/raftscope/blob/master/index.html">
-<iframe src="https://github.com/ongardie/raftscope/blob/master/index.html" style="border: 0; width: 800px; height: 580px; margin-bottom: 20px"></iframe>
