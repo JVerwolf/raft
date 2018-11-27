@@ -6,6 +6,7 @@ import (
     "fmt"
 )
 
+// The values of the various timeouts used in the Raft Algorithm.
 const (
     FollowerPeriod  = 3 * time.Second
     CandidatePeriod = 3 * time.Second
@@ -15,18 +16,21 @@ const (
 
 type NodeType int
 
+// The server roles given in the Raft paper.
 const (
     Leader    NodeType = iota
     Follower
     Candidate
 )
 
+// Node stores the state for (virtual) "servers" in this
+// Raft implemenation.
 type Node struct {
     // IMPLEMENTATION SPECIFIC STATE:
     // The following values are specific to this implementation
     // and are not a part of the raft consensus algorithm.
 
-    // Node ID
+    // Node ID.
     id int
 
     // Role of the node.
@@ -38,9 +42,9 @@ type Node struct {
     // List of other nodes participating in the protocol.
     peers []*Node
 
-    timeout                 *ticker     // Externally declared so it can be reset
-    heartBeatInput          chan string // Externally declared so it can be accessed
-    killCurrentListenerChan chan bool   // Externally declared so it can be accessed
+    timeout                 *ticker     // Externally declared so it can be reset.
+    heartBeatInput          chan string // Externally declared so it can be accessed.
+    killCurrentListenerChan chan bool   // Externally declared so it can be accessed.
 
     // RAFT SPECIFIC STATE:
     // The following values are from the states
@@ -92,6 +96,8 @@ type Entry struct {
     TermNum int
 }
 
+// NewNode initializes a new Node. Nodes act as the virtual
+// "servers" in this Raft implementation.
 func NewNode(id int, peers []*Node, stateMachine func(string)) (this *Node) {
     this = new(Node)
 
@@ -100,7 +106,7 @@ func NewNode(id int, peers []*Node, stateMachine func(string)) (this *Node) {
     this.heartBeatInput = make(chan string)
     this.stateMachine = stateMachine
 
-    // Initialize (non-leader)State described in the Raft paper:
+    // Initialize (non-leader)State described in the Raft paper.
     this.currentTerm = 0
     this.votedFor = -1
     this.log = make([]Entry, 0) // TODO: Initialize to 1?
@@ -117,6 +123,8 @@ func NewNode(id int, peers []*Node, stateMachine func(string)) (this *Node) {
     return
 }
 
+// BecomeLeader implements the logic to convert a node
+// to a be in the "Leader" state.
 func (this *Node) BecomeLeader() {
     this.nodeType = Leader
 
@@ -132,7 +140,7 @@ func (this *Node) BecomeLeader() {
     // to 0, increases monotonically).
     this.matchIndex = make([]int, len(this.peers))
     for i := range this.matchIndex {
-        this.matchIndex[i] = 0 //TODO: ensure this is correct, will need to iteratively increment values to match followers later
+        this.matchIndex[i] = 0 // TODO: ensure this is correct, will need to iteratively increment values to match followers later
     }
 
     // Leaders don't timeout, so remove listener closure.
@@ -140,6 +148,8 @@ func (this *Node) BecomeLeader() {
     this.killCurrentListenerChan <- true
 }
 
+// BecomeFollower implements the logic to convert a node
+// to a be in the "Follower" state.
 func (this *Node) BecomeFollower() {
     this.nodeType = Follower
 
@@ -153,6 +163,8 @@ func (this *Node) BecomeFollower() {
     go this.listener(this.heartBeatInput, this.BecomeCandidate)
 }
 
+// BecomeCandidate implements the logic to convert a node
+// to a be in the "Candidate" state.
 func (this *Node) BecomeCandidate() {
     this.nodeType = Candidate
 
@@ -165,10 +177,12 @@ func (this *Node) BecomeCandidate() {
     this.killCurrentListenerChan <- true
     go this.listener(this.heartBeatInput, this.BecomeCandidate)
 
-    //TODO: implement logic for requesting voting
+    // TODO: implement logic for requesting voting
 
 }
 
+// AppendEntriesRPC implements the logic geven in the
+// "AppendEntries RPC" section on pg4 of the Raft paper.
 func (this *Node) AppendEntriesRPC(
     term,
     leaderId,
@@ -179,7 +193,7 @@ func (this *Node) AppendEntriesRPC(
     // TODO: Sort newEntries?
 
     // Abdicate leadership if requester has higher term.
-    this.testToAbdicateLeadership(term)
+    this.checkToAbdicateLeadership(term)
 
     // 1. Reply false if term < currentTerm.
     if term < this.currentTerm {
@@ -206,7 +220,7 @@ func (this *Node) AppendEntriesRPC(
 
     }
 
-    // 4. Append any new entries not already in the log
+    // 4. Append any new entries not already in the log.
     this.log = append(this.log, newEntries...)
 
     // 5. If leaderCommit > commitIndex, set commitIndex =
@@ -218,6 +232,8 @@ func (this *Node) AppendEntriesRPC(
     return this.currentTerm, true
 }
 
+// RequestVoteRPC implements the logic geven in the
+// "RequestVote RPC" section on pg4 of the Raft paper.
 func (this *Node) RequestVoteRPC(
     term,
     candidateId,
@@ -225,16 +241,16 @@ func (this *Node) RequestVoteRPC(
     lastLogTerm int) (termResult int, voteGranted bool) {
 
     // Abdicate leadership if requester has a higher term.
-    this.testToAbdicateLeadership(term)
+    this.checkToAbdicateLeadership(term)
 
-    //1. Reply false if term < currentTerm (see §5.1 of the raft paper)
+    // 1. Reply false if term < currentTerm (see §5.1 of the raft paper).
     if term < this.currentTerm {
         return this.currentTerm, false
     }
 
     // 2. If votedFor is null or candidateId, and candidate’s log
     //    is at least as up-to-date as receiver’s log (see below),
-    //    grant vote (see §5.2 and §5.4 of the raft paper)
+    //    grant vote (see §5.2 and §5.4 of the raft paper).
     //
     //    If the logs have last entries with different terms,
     //    then the log with the later term is more up-to-date.
@@ -250,12 +266,12 @@ func (this *Node) RequestVoteRPC(
     return this.currentTerm, false
 }
 
-func (this *Node) testToAbdicateLeadership(term int) {
+func (this *Node) checkToAbdicateLeadership(term int) {
     // Ensure the following property:
     // If RPC request or response contains
     // term T > currentTerm: set currentTerm = T,
     // convert to follower (see §5.1 of the raft
-    // paper)
+    // paper).
 
     if term > this.currentTerm {
         this.currentTerm = term
@@ -263,27 +279,33 @@ func (this *Node) testToAbdicateLeadership(term int) {
     }
 }
 
+// ticker stores the state for the timeout logic
+// for heartbeats and candidacy timeouts.
 type ticker struct {
     period time.Duration
     ticker time.Ticker
 }
 
+// reset the ticker time, (i.e. when a heartbeat msg is
+// received).
 func (t *ticker) reset() {
     t.ticker = *time.NewTicker(t.period)
 }
 
+// newTicker instantiates a new ticker struct.
 func newTicker(period time.Duration) *ticker {
     return &ticker{period, *time.NewTicker(period)}
 }
 
-// listener used to act on heartbeat signals.
-// Will call callback on timeout.
+// listener listens to heartbeat signals and act on the
+// messages they containt. It will call the `callback` on
+// timeout.
 func (this *Node) listener(heartBeat chan string, callback func()) {
     for {
         select {
         case msg := <-heartBeat:
             this.timeout.reset()
-            fmt.Println("received: ", msg, " from hearbeat") //TODO replace with action callback
+            fmt.Println("received: ", msg, " from hearbeat") // TODO replace with action callback
         case <-this.timeout.ticker.C:
             // call to change state
             callback()
@@ -293,6 +315,9 @@ func (this *Node) listener(heartBeat chan string, callback func()) {
     }
 }
 
+// ServerEventLoop implements the "Rules for Servers" on pg4
+// of the Raft paper. It is the primary control structure (or
+// "main" function for each node.
 func (this *Node) ServerEventLoop(quit chan int) {
 
     // Note: Node could die any time, instead of dying in a
@@ -311,10 +336,11 @@ func (this *Node) ServerEventLoop(quit chan int) {
                     this.lastApplied += 1
                     this.stateMachine(this.log[this.lastApplied].Command)
                 }
+                // TODO: Not finished
 
             }
         }
-        //TODO: might need a waitgroup
+        // TODO: might need a waitgroup
     }()
 
     // If commitIndex > lastApplied: increment lastApplied, apply
@@ -334,4 +360,6 @@ func lastEntry(ents []Entry) Entry {
 }
 
 /*
-check to see if thread blocks when putting item on full chan
+Notes:
+    - check to see if thread blocks when putting item on full chan.
+ */
