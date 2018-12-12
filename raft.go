@@ -4,6 +4,7 @@ import (
     "github.com/google/go-cmp/cmp"
     "time"
     "fmt"
+    "sync"
 )
 
 // The values of the various timeouts used in the Raft Algorithm.
@@ -42,9 +43,8 @@ type Node struct {
     // List of other nodes participating in the protocol.
     peers []*Node
 
-    timeout                 *ticker     // Externally declared so it can be reset.
-    heartBeatInput          chan string // Externally declared so it can be accessed.
-    killCurrentListenerChan chan bool   // Externally declared so it can be accessed.
+    countDownTimer          *timoutTicker // Externally declared so it can be reset.
+    heartBeatInput          chan string   // Externally declared so it can be accessed.
 
     // RAFT SPECIFIC STATE:
     // The following values are from the states
@@ -98,12 +98,17 @@ type Entry struct {
 
 // NewNode initializes a new Node. Nodes act as the virtual
 // "servers" in this Raft implementation.
-func NewNode(id int, peers []*Node, stateMachine func(string)) (this *Node) {
+func NewNode(id int, stateMachine func(string)) (this *Node) {
     this = new(Node)
 
     this.id = id
-    this.BecomeFollower()
+
+    this.nodeType = Follower
+
     this.heartBeatInput = make(chan string)
+    this.countDownTimer = newTimoutTicker(FollowerPeriod)
+    this.listener(this.heartBeatInput, this.BecomeCandidate)
+
     this.stateMachine = stateMachine
 
     // Initialize (non-leader)State described in the Raft paper.
@@ -113,14 +118,29 @@ func NewNode(id int, peers []*Node, stateMachine func(string)) (this *Node) {
     this.commitIndex = 0
     this.lastApplied = 0
 
+    return this
+}
+
+func (this *Node) AddNodeToCluster(that *Node) ([]*Node) {
     // Distribute knowledge to peers.
     // In a real-world scenario, this would be handled by a
     // configuration manager, such as Zookeeper.
-    peers = append(peers, this)
-    for _, node := range peers {
-        node.peers = peers
+    this.peers = append(this.peers, that)
+    for _, node := range this.peers {
+        node.peers = this.peers
     }
-    return
+    return this.peers
+}
+
+func CreateCluster(numNodes int, stateMachine func(string)) ([]*Node) {
+    nodes := make([]*Node, numNodes)
+    for i := range nodes {
+        nodes[i] = NewNode(i, stateMachine)
+    }
+    for i := range nodes {
+        nodes[i].peers = nodes
+    }
+    return nodes
 }
 
 // BecomeLeader implements the logic to convert a node
@@ -143,9 +163,8 @@ func (this *Node) BecomeLeader() {
         this.matchIndex[i] = 0 // TODO: ensure this is correct, will need to iteratively increment values to match followers later
     }
 
-    // Leaders don't timeout, so remove listener closure.
-    this.timeout = nil
-    this.killCurrentListenerChan <- true
+    // Leaders don't timoutTicker, so remove listener closure.
+    this.countDownTimer = nil
 }
 
 // BecomeFollower implements the logic to convert a node
@@ -158,9 +177,8 @@ func (this *Node) BecomeFollower() {
     this.matchIndex = nil
 
     // Reset listener closure.
-    this.timeout = newTicker(CandidatePeriod)
-    this.killCurrentListenerChan <- true
-    go this.listener(this.heartBeatInput, this.BecomeCandidate)
+    this.countDownTimer = newTimoutTicker(FollowerPeriod)
+    this.listener(this.heartBeatInput, this.BecomeCandidate)
 }
 
 // BecomeCandidate implements the logic to convert a node
@@ -173,9 +191,8 @@ func (this *Node) BecomeCandidate() {
     this.matchIndex = nil
 
     // Reset listener closure.
-    this.timeout = newTicker(CandidatePeriod)
-    this.killCurrentListenerChan <- true
-    go this.listener(this.heartBeatInput, this.BecomeCandidate)
+    this.countDownTimer = newTimoutTicker(CandidatePeriod)
+    this.listener(this.heartBeatInput, this.BecomeCandidate)
 
     // TODO: implement logic for requesting voting
 
@@ -279,40 +296,46 @@ func (this *Node) checkToAbdicateLeadership(term int) {
     }
 }
 
-// ticker stores the state for the timeout logic
+// timoutTicker stores the state for the timoutTicker logic
 // for heartbeats and candidacy timeouts.
-type ticker struct {
+type timoutTicker struct {
     period time.Duration
     ticker time.Ticker
 }
 
-// reset the ticker time, (i.e. when a heartbeat msg is
+// reset the timoutTicker time, (i.e. when a heartbeat msg is
 // received).
-func (t *ticker) reset() {
+func (t *timoutTicker) reset() {
     t.ticker = *time.NewTicker(t.period)
 }
 
-// newTicker instantiates a new ticker struct.
-func newTicker(period time.Duration) *ticker {
-    return &ticker{period, *time.NewTicker(period)}
+// newTimoutTicker instantiates a new ticker struct.
+func newTimoutTicker(period time.Duration) *timoutTicker {
+    ticker := new(timoutTicker)
+    ticker.period = period
+    ticker.ticker = *time.NewTicker(period)
+    return ticker
 }
 
 // listener listens to heartbeat signals and act on the
-// messages they containt. It will call the `callback` on
-// timeout.
+// messages they contain. It will call the `callback` on
+// timoutTicker.
 func (this *Node) listener(heartBeat chan string, callback func()) {
-    for {
-        select {
-        case msg := <-heartBeat:
-            this.timeout.reset()
-            fmt.Println("received: ", msg, " from hearbeat") // TODO replace with action callback
-        case <-this.timeout.ticker.C:
-            // call to change state
-            callback()
-        case <-this.killCurrentListenerChan:
-            return
+    go func() {
+        for {
+            select {
+            case msg := <-heartBeat:
+                this.countDownTimer.reset()
+                fmt.Println("received: ", msg, " from hearbeat") // TODO replace with action callback
+            case <-this.countDownTimer.ticker.C:
+                fmt.Println("Node: ", this.id, " timed-out")
+                // call to change state
+                go callback()
+                fmt.Println("Node: ", this.id, " listener returned.")
+                return
+            }
         }
-    }
+    }()
 }
 
 // ServerEventLoop implements the "Rules for Servers" on pg4
@@ -331,11 +354,15 @@ func (this *Node) ServerEventLoop(quit chan int) {
             default:
                 // If commitIndex > lastApplied: increment
                 // lastApplied, apply log[lastApplied] to
-                // state machine (see §5.3 of the raft paper)
+                // state machine (see §5.3 of the raft paper).
                 if this.commitIndex > this.lastApplied {
                     this.lastApplied += 1
                     this.stateMachine(this.log[this.lastApplied].Command)
                 }
+                // If RPC request or response contains term
+                // T > currentTerm: set currentTerm = T,
+                // convert to follower (§5.1).
+
                 // TODO: Not finished
 
             }
@@ -359,7 +386,21 @@ func lastEntry(ents []Entry) Entry {
     return ents[len(ents)-1]
 }
 
+//// TEST CODE /////////////////////////////
 /*
 Notes:
     - check to see if thread blocks when putting item on full chan.
  */
+func stateMachineFactory() func(string) {
+    return func(text string) {
+        print(text)
+    }
+}
+func main() {
+    CreateCluster(1, stateMachineFactory())
+
+    var wg sync.WaitGroup
+    wg.Add(1)
+    wg.Wait()
+
+}
