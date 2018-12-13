@@ -26,7 +26,7 @@ const (
 )
 
 // Node stores the state for (virtual) "servers" in this
-// Raft implemenation.
+// Raft implementation.
 type Node struct {
     // IMPLEMENTATION SPECIFIC STATE:
     // The following values are specific to this implementation
@@ -92,10 +92,17 @@ type Node struct {
     matchIndex []int
 }
 
-type Entry struct {
-    Command string
-    Index   int
-    TermNum int
+// CreateCluster instantiates a live Raft cluster.
+// This is the main entry-point into the system.
+func CreateCluster(numNodes int, stateMachine func(string)) ([]*Node) {
+    nodes := make([]*Node, numNodes)
+    for i := range nodes {
+        nodes[i] = NewNode(i, stateMachine)
+    }
+    for i := range nodes {
+        nodes[i].peers = nodes
+    }
+    return nodes
 }
 
 // NewNode initializes a new Node. Nodes act as the virtual
@@ -112,74 +119,12 @@ func NewNode(id int, stateMachine func(string)) (this *Node) {
     // Initialize (non-leader)State described in the Raft paper.
     this.currentTerm = 0
     this.votedFor = -1
-    this.log = make([]Entry, 1) // TODO: Initialize to 1?
+    this.log = make([]Entry, 1)
     this.commitIndex = 0
     this.lastApplied = 0
 
     this.BecomeFollower()
     return this
-}
-
-func (this *Node) AddNodeToCluster(that *Node) ([]*Node) {
-    // Distribute knowledge to peers.
-    // In a real-world scenario, this would be handled by a
-    // configuration manager, such as Zookeeper.
-    this.peers = append(this.peers, that)
-    for _, node := range this.peers {
-        node.peers = this.peers
-    }
-    return this.peers
-}
-
-func CreateCluster(numNodes int, stateMachine func(string)) ([]*Node) {
-    nodes := make([]*Node, numNodes)
-    for i := range nodes {
-        nodes[i] = NewNode(i, stateMachine)
-    }
-    for i := range nodes {
-        nodes[i].peers = nodes
-    }
-    return nodes
-}
-
-// BecomeLeader implements the logic to convert a node
-// to be in the "Leader" state.
-func (this *Node) BecomeLeader() {
-    go func() {
-        fmt.Println("Node: ", this.id, " became leader.")
-
-        this.nodeType = Leader
-
-        // Initialize all nextIndex values to the index value just
-        // after the last index in the log. (The log starts at 1.)
-        this.nextIndex = make([]int, len(this.peers))
-        for i := range this.nextIndex {
-            this.nextIndex[i] = len(this.log) + 1
-        }
-
-        // For each server, index of highest log entry
-        // known to be replicated on server (initialized
-        // to 0, increases monotonically).
-        this.matchIndex = make([]int, len(this.peers))
-        for i := range this.matchIndex {
-            this.matchIndex[i] = 0 // TODO: ensure this is correct, will need to iteratively increment values to match followers later
-        }
-        // TODO: Leader needs a goroutine with a quit chanel
-        // goroutine routinly broadcasts hearbeats.
-        // each hearbeat has info from broadcast channel.
-
-        heartBeatTimer := newTimoutTicker(HeartBeatPeriod)
-        for {
-            select {
-            case <-heartBeatTimer.ticker.C:
-                for _, node := range this.peers {
-                    node.heartBeatInput <- "Message"
-                }
-            default:
-            }
-        }
-
-    }()
 }
 
 // BecomeFollower implements the logic to convert a node
@@ -193,16 +138,21 @@ func (this *Node) BecomeFollower() {
         this.nextIndex = nil
         this.matchIndex = nil
 
-        // Set timer.
+        // Set timeout. When triggered, the node will
+        // become a follower.
         countDownTimer := newTimoutTicker(followerRandPeriod())
         for {
             select {
             case val := <-this.heartBeatInput:
                 fmt.Println("Node: ", this.id, " received a heartbeat: ", val)
+
+                // Reset the timer, preventing transition into
+                // candidate state.
                 countDownTimer.reset()
 
-                // TODO: reset votedFor if this term is greater in heartbeat.
-                // TODO apply update in `val` to state machine.
+                // TODO: Reset votedFor if this term is greater
+                // the term given in the heartbeat.
+                // TODO: Apply update in `val` to state machine.
             case <-countDownTimer.ticker.C:
                 fmt.Println("Node: ", this.id, " timed out.")
                 this.BecomeCandidate()
@@ -211,6 +161,36 @@ func (this *Node) BecomeFollower() {
             }
         }
     }()
+}
+
+// TIMEOUT LOGIC
+
+// timoutTicker stores the state for the timoutTicker logic,
+// heartbeats, and candidacy timeouts.
+type timoutTicker struct {
+    period time.Duration
+    ticker time.Ticker
+}
+
+// reset the timoutTicker time, (i.e. when a heartbeat msg is
+// received).
+func (t *timoutTicker) reset() {
+    t.ticker = *time.NewTicker(t.period)
+}
+
+// newTimoutTicker instantiates a new ticker struct.
+func newTimoutTicker(period time.Duration) *timoutTicker {
+    ticker := new(timoutTicker)
+    ticker.period = period
+    ticker.ticker = *time.NewTicker(period)
+    return ticker
+}
+
+// followerRandPeriod adds a small random duration to the
+// FollowerPeriod.  This helps prevent multiple Followers
+// from becoming Candidates at the same time.
+func followerRandPeriod() time.Duration {
+    return FollowerPeriod + time.Duration(rand.Intn(10))*time.Millisecond
 }
 
 // BecomeCandidate implements the logic to convert a node
@@ -230,7 +210,7 @@ func (this *Node) BecomeCandidate() {
         this.matchIndex = nil
 
         // TODO: No timeout logic yet.
-        // TODO: problem, how to cancel after timeout. https://gobyexample.com/timeouts
+        // TODO: How to cancel after timeout: https://gobyexample.com/timeouts
         // TODO: RequestVoteRPC should be called in parallel according to paper.
         yes_votes := 0
         no_votes := 0
@@ -239,7 +219,8 @@ func (this *Node) BecomeCandidate() {
                 this.currentTerm,
                 this.id,
                 this.commitIndex,
-                this.currentTerm) // TODO: ensure these params are correct.
+                this.currentTerm)
+            // TODO: ensure these params are correct.
 
             // Cancel election if another node is discovered
             // to have a higher term.
@@ -254,7 +235,6 @@ func (this *Node) BecomeCandidate() {
             } else {
                 no_votes++
             }
-
         }
 
         // Act on results of election.
@@ -264,57 +244,6 @@ func (this *Node) BecomeCandidate() {
             this.BecomeFollower()
         }
     }()
-}
-
-// AppendEntriesRPC implements the logic geven in the
-// "AppendEntries RPC" section on pg4 of the Raft paper.
-func (this *Node) AppendEntriesRPC(
-    term,
-    leaderId,
-    prevLogIndex,
-    prevLogTerm int,
-    newEntries []Entry,
-    leaderCommit int) (termResult int, success bool) {
-    // TODO: Sort newEntries?
-
-    // Abdicate leadership if requester has higher term.
-    this.checkToAbdicateLeadership(term) //TODO needs updating.
-
-    // 1. Reply false if term < currentTerm.
-    if term < this.currentTerm {
-        return this.currentTerm, false
-    }
-
-    // 2. Reply false if log doesn’t contain an entry at prevLogIndex
-    //    whose term matches prevLogTerm (see §5.3 of the raft paper).
-    if this.log[prevLogIndex].TermNum != prevLogTerm {
-        return this.currentTerm, false
-    }
-
-    // 3. If an existing entry conflicts with a new one (same index
-    //    but different terms), delete the existing entry and all that
-    //    follow it (see §5.3 of the raft paper).
-    for _, newEntry := range newEntries {
-        indexIsInRange := len(this.log) <= newEntry.Index
-        if indexIsInRange {
-            entryIsUnequal := !cmp.Equal(this.log[newEntry.Index], newEntry)
-            if entryIsUnequal {
-                this.log = this.log[:newEntry.Index] // todo: check to ensure this works.
-            }
-        }
-
-    }
-
-    // 4. Append any new entries not already in the log.
-    this.log = append(this.log, newEntries...)
-
-    // 5. If leaderCommit > commitIndex, set commitIndex =
-    //    min(leaderCommit, index of last new entry).
-    if leaderCommit > this.commitIndex {
-        this.commitIndex = minInt(leaderCommit, lastEntry(newEntries).Index)
-    }
-
-    return this.currentTerm, true
 }
 
 // RequestVoteRPC implements the logic geven in the
@@ -356,6 +285,109 @@ func (this *Node) RequestVoteRPC(
     return this.currentTerm, false
 }
 
+// BecomeLeader implements the logic to convert a node
+// to be in the "Leader" state.
+func (this *Node) BecomeLeader() {
+    go func() {
+        fmt.Println("Node: ", this.id, " became leader.")
+
+        this.nodeType = Leader
+
+        // Initialize all nextIndex values to the index value just
+        // after the last index in the log. (The log starts at 1.)
+        this.nextIndex = make([]int, len(this.peers))
+        for i := range this.nextIndex {
+            this.nextIndex[i] = len(this.log) + 1
+        }
+
+        // For each server, index of highest log entry
+        // known to be replicated on server (initialized
+        // to 0, increases monotonically).
+        this.matchIndex = make([]int, len(this.peers))
+        // TODO: Ensure this is correct, will need to
+        // iteratively increment values to match followers
+        // later.
+        for i := range this.matchIndex {
+            this.matchIndex[i] = 0
+        }
+
+        // TODO: Leader needs a quit chanel
+        // goroutine routinly broadcasts hearbeats.
+        // each hearbeat has info from broadcast channel.
+        heartBeatTimer := newTimoutTicker(HeartBeatPeriod)
+        for {
+            select {
+            case <-heartBeatTimer.ticker.C:
+                for _, node := range this.peers {
+                    node.heartBeatInput <- "Message"
+                }
+            default:
+            }
+        }
+
+    }()
+}
+
+// Entry stores state in the log entries for each node.
+type Entry struct {
+    Command string
+    Index   int
+    TermNum int
+}
+
+// AppendEntriesRPC implements the logic geven in the
+// "AppendEntries RPC" section on pg4 of the Raft paper.
+func (this *Node) AppendEntriesRPC(
+    term,
+    leaderId,
+    prevLogIndex,
+    prevLogTerm int,
+    newEntries []Entry,
+    leaderCommit int) (termResult int, success bool) {
+    // TODO: Sort newEntries?
+
+    // Abdicate leadership if requester has higher term.
+    //TODO needs updating.
+    this.checkToAbdicateLeadership(term)
+
+    // 1. Reply false if term < currentTerm.
+    if term < this.currentTerm {
+        return this.currentTerm, false
+    }
+
+    // 2. Reply false if log doesn’t contain an entry at prevLogIndex
+    //    whose term matches prevLogTerm (see §5.3 of the raft paper).
+    if this.log[prevLogIndex].TermNum != prevLogTerm {
+        return this.currentTerm, false
+    }
+
+    // 3. If an existing entry conflicts with a new one (same index
+    //    but different terms), delete the existing entry and all that
+    //    follow it (see §5.3 of the raft paper).
+    for _, newEntry := range newEntries {
+        indexIsInRange := len(this.log) <= newEntry.Index
+        if indexIsInRange {
+            entryIsUnequal := !cmp.Equal(this.log[newEntry.Index], newEntry)
+            if entryIsUnequal {
+                // Todo: check to ensure this works.
+                this.log = this.log[:newEntry.Index]
+            }
+        }
+
+    }
+
+    // 4. Append any new entries not already in the log.
+    this.log = append(this.log, newEntries...)
+
+    // 5. If leaderCommit > commitIndex, set commitIndex =
+    //    min(leaderCommit, index of last new entry).
+    if leaderCommit > this.commitIndex {
+        this.commitIndex = minInt(leaderCommit, lastEntry(newEntries).Index)
+    }
+
+    return this.currentTerm, true
+}
+
 func (this *Node) checkToAbdicateLeadership(term int) {
     // Ensure the following property:
     // If RPC request or response contains
@@ -369,66 +401,6 @@ func (this *Node) checkToAbdicateLeadership(term int) {
     }
 }
 
-// timoutTicker stores the state for the timoutTicker logic
-// for heartbeats and candidacy timeouts.
-type timoutTicker struct {
-    period time.Duration
-    ticker time.Ticker
-}
-
-// reset the timoutTicker time, (i.e. when a heartbeat msg is
-// received).
-func (t *timoutTicker) reset() {
-    t.ticker = *time.NewTicker(t.period)
-}
-
-// newTimoutTicker instantiates a new ticker struct.
-func newTimoutTicker(period time.Duration) *timoutTicker {
-    ticker := new(timoutTicker)
-    ticker.period = period
-    ticker.ticker = *time.NewTicker(period)
-    return ticker
-}
-
-func followerRandPeriod() time.Duration {
-    return FollowerPeriod + time.Duration(rand.Intn(10))*time.Millisecond
-}
-
-// ServerEventLoop implements the "Rules for Servers" on pg4
-// of the Raft paper. It is the primary control structure (or
-// "main" function for each node.
-func (this *Node) ServerEventLoop(quit chan int) {
-
-    // Note: Node could die any time, instead of dying in a
-    // well-behaved state like what is is shown when quit is
-    // called.
-    go func() {
-        for {
-            select {
-            case <-quit:
-                return
-            default:
-                // If commitIndex > lastApplied: increment
-                // lastApplied, apply log[lastApplied] to
-                // state machine (see §5.3 of the raft paper).
-                if this.commitIndex > this.lastApplied {
-                    this.lastApplied += 1
-                    this.stateMachine(this.log[this.lastApplied].Command)
-                }
-                // If RPC request or response contains term
-                // T > currentTerm: set currentTerm = T,
-                // convert to follower (§5.1).
-
-                // TODO: Not finished
-
-            }
-        }
-        // TODO: might need a waitgroup
-    }()
-
-    // If commitIndex > lastApplied: increment lastApplied, apply
-}
-
 // minInt finds Min of ints.
 func minInt(a, b int) int {
     if a < b {
@@ -440,6 +412,17 @@ func minInt(a, b int) int {
 // lastEntry find last Entry in slice of Entries.
 func lastEntry(ents []Entry) Entry {
     return ents[len(ents)-1]
+}
+
+func (this *Node) AddNodeToCluster(that *Node) ([]*Node) {
+    // Distribute knowledge to peers.
+    // In a real-world scenario, this would be handled by a
+    // configuration manager, such as Zookeeper.
+    this.peers = append(this.peers, that)
+    for _, node := range this.peers {
+        node.peers = this.peers
+    }
+    return this.peers
 }
 
 //// TEST CODE /////////////////////////////
