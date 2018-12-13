@@ -5,6 +5,7 @@ import (
     "time"
     "fmt"
     "sync"
+    "math/rand"
 )
 
 // The values of the various timeouts used in the Raft Algorithm.
@@ -43,8 +44,8 @@ type Node struct {
     // List of other nodes participating in the protocol.
     peers []*Node
 
-    countDownTimer          *timoutTicker // Externally declared so it can be reset.
-    heartBeatInput          chan string   // Externally declared so it can be accessed.
+    //countDownTimer *timoutTicker // Externally declared so it can be reset.
+    heartBeatInput chan string // Externally declared so it can be accessed.
 
     // RAFT SPECIFIC STATE:
     // The following values are from the states
@@ -58,7 +59,8 @@ type Node struct {
 
     // CandidateId that received vote in current
     // term (or null if none).
-    votedFor int
+    votedFor      int
+    votedForMutex *sync.Mutex
 
     // Log entries; each entry contains command
     // for state machine, and term when entry
@@ -99,25 +101,22 @@ type Entry struct {
 // NewNode initializes a new Node. Nodes act as the virtual
 // "servers" in this Raft implementation.
 func NewNode(id int, stateMachine func(string)) (this *Node) {
+
     this = new(Node)
 
     this.id = id
-
-    this.nodeType = Follower
-
-    this.heartBeatInput = make(chan string)
-    this.countDownTimer = newTimoutTicker(FollowerPeriod)
-    this.listener(this.heartBeatInput, this.BecomeCandidate)
-
+    this.heartBeatInput = make(chan string,2)
     this.stateMachine = stateMachine
+    this.votedForMutex = &sync.Mutex{}
 
     // Initialize (non-leader)State described in the Raft paper.
     this.currentTerm = 0
     this.votedFor = -1
-    this.log = make([]Entry, 0) // TODO: Initialize to 1?
+    this.log = make([]Entry, 1) // TODO: Initialize to 1?
     this.commitIndex = 0
     this.lastApplied = 0
 
+    this.BecomeFollower()
     return this
 }
 
@@ -144,58 +143,124 @@ func CreateCluster(numNodes int, stateMachine func(string)) ([]*Node) {
 }
 
 // BecomeLeader implements the logic to convert a node
-// to a be in the "Leader" state.
+// to be in the "Leader" state.
 func (this *Node) BecomeLeader() {
-    this.nodeType = Leader
+    go func() {
+        fmt.Println("Node: ", this.id, " became leader.")
 
-    // Initialize all nextIndex values to the index value just
-    // after the last index in the log. (The log starts at 1.)
-    this.nextIndex = make([]int, len(this.peers))
-    for i := range this.nextIndex {
-        this.nextIndex[i] = len(this.log) + 1
-    }
+        this.nodeType = Leader
 
-    // For each server, index of highest log entry
-    // known to be replicated on server (initialized
-    // to 0, increases monotonically).
-    this.matchIndex = make([]int, len(this.peers))
-    for i := range this.matchIndex {
-        this.matchIndex[i] = 0 // TODO: ensure this is correct, will need to iteratively increment values to match followers later
-    }
+        // Initialize all nextIndex values to the index value just
+        // after the last index in the log. (The log starts at 1.)
+        this.nextIndex = make([]int, len(this.peers))
+        for i := range this.nextIndex {
+            this.nextIndex[i] = len(this.log) + 1
+        }
 
-    // Leaders don't timoutTicker, so remove listener closure.
-    this.countDownTimer = nil
+        // For each server, index of highest log entry
+        // known to be replicated on server (initialized
+        // to 0, increases monotonically).
+        this.matchIndex = make([]int, len(this.peers))
+        for i := range this.matchIndex {
+            this.matchIndex[i] = 0 // TODO: ensure this is correct, will need to iteratively increment values to match followers later
+        }
+        // TODO: Leader needs a goroutine with a quit chanel
+        // goroutine routinly broadcasts hearbeats.
+        // each hearbeat has info from broadcast channel.
+
+        heartBeatTimer := newTimoutTicker(HeartBeatPeriod)
+        for {
+            select {
+            case <-heartBeatTimer.ticker.C:
+                for _, node := range this.peers {
+                    node.heartBeatInput <- "heartbeat"
+                }
+            }
+        }
+
+    }()
 }
 
 // BecomeFollower implements the logic to convert a node
-// to a be in the "Follower" state.
+// to be in the "Follower" state.
 func (this *Node) BecomeFollower() {
-    this.nodeType = Follower
+    go func() {
+        fmt.Println("Node: ", this.id, " became follower.")
+        this.nodeType = Follower
 
-    // Remove leader attributes.
-    this.nextIndex = nil
-    this.matchIndex = nil
+        // Remove leader attributes.
+        this.nextIndex = nil
+        this.matchIndex = nil
 
-    // Reset listener closure.
-    this.countDownTimer = newTimoutTicker(FollowerPeriod)
-    this.listener(this.heartBeatInput, this.BecomeCandidate)
+        // Set timer.
+        countDownTimer := newTimoutTicker(followerRandPeriod())
+        for {
+            select {
+            case val := <-this.heartBeatInput:
+                fmt.Println("Node: ", this.id, " received a heartbeat: ", val)
+                countDownTimer.reset()
+                // TODO: reset votedFor if this term is greater in heartbeat.
+                // TODO apply update in `val` to state machine.
+            case <-countDownTimer.ticker.C:
+                fmt.Println("Node: ", this.id, " timed out.")
+                this.BecomeCandidate()
+                return
+            }
+        }
+    }()
 }
 
 // BecomeCandidate implements the logic to convert a node
-// to a be in the "Candidate" state.
+// to be in the "Candidate" state.
 func (this *Node) BecomeCandidate() {
-    this.nodeType = Candidate
+    go func() {
+        fmt.Println("Node: ", this.id, " became Candidate.")
 
-    // Remove leader attributes.
-    this.nextIndex = nil
-    this.matchIndex = nil
+        // To begin an election, a follower increments its current
+        // term and transitions to candidate state (see §5.2 of the
+        // raft paper).
+        this.currentTerm++
+        this.nodeType = Candidate
 
-    // Reset listener closure.
-    this.countDownTimer = newTimoutTicker(CandidatePeriod)
-    this.listener(this.heartBeatInput, this.BecomeCandidate)
+        // Remove leader attributes.
+        this.nextIndex = nil
+        this.matchIndex = nil
 
-    // TODO: implement logic for requesting voting
+        // TODO: No timeout logic yet.
+        // TODO: problem, how to cancel after timeout. https://gobyexample.com/timeouts
+        // TODO: RequestVoteRPC should be called in parallel according to paper.
+        yes_votes := 0
+        no_votes := 0
+        for _, node := range this.peers {
+            termResult, voteGranted := node.RequestVoteRPC(
+                this.currentTerm,
+                this.id,
+                this.commitIndex,
+                this.currentTerm) // TODO: ensure these params are correct.
 
+            // Cancel election if another node is discovered
+            // to have a higher term.
+            if termResult > this.currentTerm {
+                this.BecomeFollower()
+                return
+            }
+
+            // Record vote.
+            if voteGranted {
+                yes_votes++
+            } else {
+                no_votes++
+            }
+
+        }
+
+        // Act on results of election.
+        if (yes_votes ) > no_votes {
+            this.BecomeLeader()
+        } else {
+            this.BecomeFollower()
+        }
+    }()
 }
 
 // AppendEntriesRPC implements the logic geven in the
@@ -210,7 +275,7 @@ func (this *Node) AppendEntriesRPC(
     // TODO: Sort newEntries?
 
     // Abdicate leadership if requester has higher term.
-    this.checkToAbdicateLeadership(term)
+    this.checkToAbdicateLeadership(term) //TODO no longer works
 
     // 1. Reply false if term < currentTerm.
     if term < this.currentTerm {
@@ -273,11 +338,16 @@ func (this *Node) RequestVoteRPC(
     //    then the log with the later term is more up-to-date.
     //    If the logs end with the same term, then whichever
     //    log is longer is more up-to-date.
+    this.votedForMutex.Lock()
     notYetVoted := this.votedFor == -1
     votedSameBefore := this.votedFor == candidateId
     requesterMoreUpToDate := lastEntry(this.log).TermNum <= term
     if (notYetVoted || votedSameBefore) && requesterMoreUpToDate {
+        this.votedFor = candidateId
+        this.votedForMutex.Unlock()
         return this.currentTerm, true
+    } else {
+        this.votedForMutex.Unlock()
     }
 
     return this.currentTerm, false
@@ -317,25 +387,8 @@ func newTimoutTicker(period time.Duration) *timoutTicker {
     return ticker
 }
 
-// listener listens to heartbeat signals and act on the
-// messages they contain. It will call the `callback` on
-// timoutTicker.
-func (this *Node) listener(heartBeat chan string, callback func()) {
-    go func() {
-        for {
-            select {
-            case msg := <-heartBeat:
-                this.countDownTimer.reset()
-                fmt.Println("received: ", msg, " from hearbeat") // TODO replace with action callback
-            case <-this.countDownTimer.ticker.C:
-                fmt.Println("Node: ", this.id, " timed-out")
-                // call to change state
-                go callback()
-                fmt.Println("Node: ", this.id, " listener returned.")
-                return
-            }
-        }
-    }()
+func followerRandPeriod() time.Duration {
+    return FollowerPeriod + time.Duration(rand.Intn(10))*time.Millisecond
 }
 
 // ServerEventLoop implements the "Rules for Servers" on pg4
@@ -397,7 +450,7 @@ func stateMachineFactory() func(string) {
     }
 }
 func main() {
-    CreateCluster(1, stateMachineFactory())
+    CreateCluster(3, stateMachineFactory())
 
     var wg sync.WaitGroup
     wg.Add(1)
