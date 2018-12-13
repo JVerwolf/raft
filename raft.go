@@ -105,7 +105,7 @@ func NewNode(id int, stateMachine func(string)) (this *Node) {
     this = new(Node)
 
     this.id = id
-    this.heartBeatInput = make(chan string,2)
+    this.heartBeatInput = make(chan string, 1000)
     this.stateMachine = stateMachine
     this.votedForMutex = &sync.Mutex{}
 
@@ -173,8 +173,9 @@ func (this *Node) BecomeLeader() {
             select {
             case <-heartBeatTimer.ticker.C:
                 for _, node := range this.peers {
-                    node.heartBeatInput <- "heartbeat"
+                    node.heartBeatInput <- "Message"
                 }
+            default:
             }
         }
 
@@ -199,12 +200,14 @@ func (this *Node) BecomeFollower() {
             case val := <-this.heartBeatInput:
                 fmt.Println("Node: ", this.id, " received a heartbeat: ", val)
                 countDownTimer.reset()
+
                 // TODO: reset votedFor if this term is greater in heartbeat.
                 // TODO apply update in `val` to state machine.
             case <-countDownTimer.ticker.C:
                 fmt.Println("Node: ", this.id, " timed out.")
                 this.BecomeCandidate()
                 return
+            default:
             }
         }
     }()
@@ -275,7 +278,7 @@ func (this *Node) AppendEntriesRPC(
     // TODO: Sort newEntries?
 
     // Abdicate leadership if requester has higher term.
-    this.checkToAbdicateLeadership(term) //TODO no longer works
+    this.checkToAbdicateLeadership(term) //TODO needs updating.
 
     // 1. Reply false if term < currentTerm.
     if term < this.currentTerm {
